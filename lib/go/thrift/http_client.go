@@ -25,6 +25,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+
+	"golang.org/x/net/context"
+	"golang.org/x/net/context/ctxhttp"
 )
 
 type THttpClient struct {
@@ -34,6 +37,7 @@ type THttpClient struct {
 	header             http.Header
 	nsecConnectTimeout int64
 	nsecReadTimeout    int64
+	ctx                context.Context
 }
 
 type THttpClientTransportFactory struct {
@@ -45,11 +49,17 @@ func (p *THttpClientTransportFactory) GetTransport(trans TTransport) TTransport 
 	if trans != nil {
 		t, ok := trans.(*THttpClient)
 		if ok && t.url != nil {
+			var ctx = t.ctx
+
+			if ctx == nil {
+				ctx = context.Background()
+			}
+
 			if t.requestBuffer != nil {
-				t2, _ := NewTHttpPostClient(t.url.String())
+				t2, _ := NewTHttpPostClientWithCtx(t.url.String(), ctx)
 				return t2
 			}
-			t2, _ := NewTHttpClient(t.url.String())
+			t2, _ := NewTHttpClientWithCtx(t.url.String(), ctx)
 			return t2
 		}
 	}
@@ -70,24 +80,38 @@ func NewTHttpPostClientTransportFactory(url string) *THttpClientTransportFactory
 }
 
 func NewTHttpClient(urlstr string) (TTransport, error) {
+	return NewTHttpClientWithCtx(urlstr, context.Background())
+}
+
+func NewTHttpClientWithCtx(urlstr string, ctx context.Context) (TTransport, error) {
 	parsedURL, err := url.Parse(urlstr)
 	if err != nil {
 		return nil, err
 	}
-	response, err := http.Get(urlstr)
+
+	response, err := ctxhttp.Get(ctx, nil, urlstr)
 	if err != nil {
 		return nil, err
 	}
-	return &THttpClient{response: response, url: parsedURL}, nil
+	return &THttpClient{response: response, url: parsedURL, ctx: ctx}, nil
 }
 
 func NewTHttpPostClient(urlstr string) (TTransport, error) {
+	return NewTHttpPostClientWithCtx(urlstr, context.Background())
+}
+
+func NewTHttpPostClientWithCtx(urlstr string, ctx context.Context) (TTransport, error) {
 	parsedURL, err := url.Parse(urlstr)
 	if err != nil {
 		return nil, err
 	}
 	buf := make([]byte, 0, 1024)
-	return &THttpClient{url: parsedURL, requestBuffer: bytes.NewBuffer(buf), header: http.Header{}}, nil
+	return &THttpClient{
+		url:           parsedURL,
+		requestBuffer: bytes.NewBuffer(buf),
+		header:        http.Header{},
+		ctx:           ctx,
+	}, nil
 }
 
 // Set the HTTP Header for this specific Thrift Transport
@@ -186,7 +210,7 @@ func (p *THttpClient) Flush() error {
 	}
 	p.header.Add("Content-Type", "application/x-thrift")
 	req.Header = p.header
-	response, err := client.Do(req)
+	response, err := ctxhttp.Do(p.ctx, client, req)
 	if err != nil {
 		return NewTTransportExceptionFromError(err)
 	}
@@ -201,12 +225,11 @@ func (p *THttpClient) Flush() error {
 }
 
 func (p *THttpClient) RemainingBytes() (num_bytes uint64) {
-	len := p.response.ContentLength 
+	len := p.response.ContentLength
 	if len >= 0 {
 		return uint64(len)
 	}
-	
-	const maxSize = ^uint64(0)
-	return maxSize  // the thruth is, we just don't know unless framed is used
-}
 
+	const maxSize = ^uint64(0)
+	return maxSize // the thruth is, we just don't know unless framed is used
+}
